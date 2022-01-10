@@ -146,17 +146,20 @@ class PawpularityModel(nn.Module):
             nn.Linear(1024, 1024)
         )
         self.dense_layers = nn.Sequential(
-            nn.Dropout(p=0.5),
-            nn.Linear(img_size[0] * img_size[1] * 2 + 1024, 1024),
+            nn.Dropout(p=0.3),
+            nn.Linear(img_size[0] * img_size[1] * 2 + 1024, 4096),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(1024, 512),
+            nn.Linear(4096, 4096),
             nn.ReLU(),
             nn.Dropout(p=0.5),
-            nn.Linear(512, 256),
+            nn.Linear(4096, 4096),
             nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(256, 1)
+            nn.Dropout(p=0.3),
+            nn.Linear(4096, 1024),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(1024, 1)
         )
 
     def forward(self, X):
@@ -260,8 +263,8 @@ def grade(model, device, batches, train_loader, test_loader):
 
 
 # Image size, preprocessing
-img_size = (240, 240)
-#preprocess_images('train.csv', 'train', 'train-post', img_size)
+img_size = (96, 96)
+preprocess_images('train.csv', 'train', 'train-post', img_size)
 
 # Data augmentation transforms
 hFlip = transforms.RandomHorizontalFlip(p=0.25)
@@ -297,10 +300,10 @@ device = torch.device("cuda:0")
 model.to(device)
 
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=3e-7)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-7)
 
 # Training run
-train(model, device, criterion, optimizer, batches, train_loader, test_loader, epochs=10)
+train(model, device, criterion, optimizer, batches, train_loader, test_loader, epochs=20)
 
 torch.save(model.state_dict(), 'model.pth')
 print("Saved model.")
