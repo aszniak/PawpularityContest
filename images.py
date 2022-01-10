@@ -12,9 +12,56 @@ import os
 import cProfile
 import pstats
 from pstats import SortKey
+from PIL import Image
 
 
-IMG_BOX = 1280
+def process_image(im, final_size, destination, index):
+    bg = (0, 0, 0)
+    w, h = im.size
+    if w == h:
+        image = im.resize(final_size)
+        image.save(os.path.join(destination, index + ".jpg"))
+    elif w > h:
+        image = Image.new(im.mode, (w, w), bg)
+        image.paste(im, (0, (w - h) // 2))
+        image = image.resize(final_size)
+        image.save(os.path.join(destination, index + ".jpg"))
+    elif h > w:
+        image = Image.new(im.mode, (h, h), bg)
+        image.paste(im, ((h - w) // 2, 0))
+        image = image.resize(final_size)
+        image.save(os.path.join(destination, index + ".jpg"))
+
+
+def preprocess_images(labels_csv, source, destination, final_size):
+    print("Starting image preprocessing...")
+    if not os.path.isdir(destination):
+        os.mkdir(destination)
+    df = pd.read_csv(labels_csv)
+    indexes = df['Id']
+    i = 0
+    n = len(indexes)
+    t0 = datetime.now()
+    processed = 0
+    skipped = 0
+    for index in indexes:
+        if (i + 1) % 1000 == 0:
+            print(f"Checking image {i + 1}/{n}")
+        if os.path.isfile(os.path.join(destination, index + ".jpg")):
+            with Image.open(os.path.join(destination, index + ".jpg")) as dst_im:
+                if dst_im.size == final_size:
+                    skipped += 1
+                    pass
+                else:
+                    with Image.open(os.path.join(source, index + ".jpg")) as src_im:
+                        process_image(src_im, final_size, destination, index)
+                        processed += 1
+        else:
+            with Image.open(os.path.join(source, index + ".jpg")) as src_im:
+                process_image(src_im, final_size, destination, index)
+                processed += 1
+        i += 1
+    print(f"Image preprocessing took {datetime.now() - t0}, processed {processed} images, skipped {skipped}")
 
 
 class PawpularityImages(Dataset):
@@ -36,43 +83,9 @@ class PawpularityImages(Dataset):
         img_path = os.path.join(self.img_dir, self.indexes.iloc[item])
         image = read_image(img_path + ".jpg")
         target = torch.tensor(self.targets[item].reshape(-1))
-        """Image reshaping and padding."""
-        if image.shape[1] != IMG_BOX or image.shape[2] != IMG_BOX:
-            resize = transforms.Resize(IMG_BOX - 1, max_size=IMG_BOX)
-            image = resize(image)
-        if image.shape[1] < IMG_BOX:
-            padding = int(np.floor((IMG_BOX - image.shape[1]) / 2))
-            pad = transforms.Pad(padding=(0, padding))
-            image = pad(image)
-        if image.shape[2] < IMG_BOX:
-            padding = int(np.floor((IMG_BOX - image.shape[2]) / 2))
-            pad = transforms.Pad(padding=(padding, 0))
-            image = pad(image)
-        # final_resize = transforms.Resize((IMG_BOX//2, IMG_BOX//2))
-        final_resize = transforms.Resize((192, 192))  # Get rid of FP errors, VRAM saving
-        image = final_resize(image)
         image = image.type(torch.float32)
         image = (image - torch.mean(image)) / torch.std(image)
         return image, target
-
-
-train_dataset = PawpularityImages(targets_csv='train.csv',
-                                  img_dir='train',
-                                  tr_test='train')
-
-test_dataset = PawpularityImages(targets_csv='train.csv',
-                                 img_dir='train',
-                                 tr_test='test')
-
-
-# image, target = test_dataset.__getitem__(0)
-# print(image)
-
-# im_arr = test_dataset.__getitem__(5)[0].numpy()
-# print(im_arr.shape)
-# im_arr = np.transpose(im_arr, (1, 2, 0))
-# plt.imshow(im_arr)
-# plt.show()
 
 
 class CNN(nn.Module):
@@ -112,23 +125,9 @@ class CNN(nn.Module):
         return out
 
 
-batch_sz = 50
-batches = train_dataset.__len__() / batch_sz
-train_loader = DataLoader(dataset=train_dataset, batch_size=batch_sz, shuffle=True)
-test_loader = DataLoader(dataset=test_dataset, batch_size=batch_sz, shuffle=False)
-
-model = CNN()
-device = torch.device("cuda:0")
-model.to(device)
-
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters())
-
-train_losses = []
-test_losses = []
-
-
-def train(epochs, grade):
+def train(epochs, grade, model, device, criterion, optimizer, batches):
+    train_losses = []
+    test_losses = []
     epochs = epochs
     t0 = datetime.now()
     for epoch in range(epochs):
@@ -137,7 +136,7 @@ def train(epochs, grade):
         batch = 0
         for inputs, targets in train_loader:
             batch += 1
-            if (batch % 5) - 1 == 0:
+            if (batch % 10) - 1 == 0:
                 batch_t0 = datetime.now()
             inputs, targets = inputs.to(device), targets.to(device)
 
@@ -150,7 +149,7 @@ def train(epochs, grade):
             optimizer.step()
 
             train_loss.append(loss.item())
-            if batch % 5 == 0:
+            if batch % 10 == 0:
                 dt = datetime.now() - batch_t0
                 print(f"Processed batch {batch}/{int(np.ceil(batches))}, duration {dt}")
 
@@ -208,7 +207,41 @@ def train(epochs, grade):
             print(f"Train RMSE: {train_RMSE:.4f}, Test RMSE: {test_RMSE:.4f}")
 
 
-# cProfile.run('train(1, grade=False)', 'stats')
+img_size = (192, 192)
+preprocess_images('train.csv', 'train', 'train-post', img_size)
+
+train_dataset = PawpularityImages(targets_csv='train.csv',
+                                  img_dir='train-post',
+                                  tr_test='train', )
+
+test_dataset = PawpularityImages(targets_csv='train.csv',
+                                 img_dir='train-post',
+                                 tr_test='test')
+
+# image, target = test_dataset.__getitem__(0)
+# print(image)
+
+# im_arr = test_dataset.__getitem__(5)[0].numpy()
+# print(im_arr.shape)
+# im_arr = np.transpose(im_arr, (1, 2, 0))
+# plt.imshow(im_arr)
+# plt.show()
+
+batch_sz = 50
+batches = train_dataset.__len__() / batch_sz
+train_loader = DataLoader(dataset=train_dataset, batch_size=batch_sz, shuffle=True)
+test_loader = DataLoader(dataset=test_dataset, batch_size=batch_sz, shuffle=False)
+
+model = CNN()
+device = torch.device("cuda:0")
+model.to(device)
+
+criterion = nn.MSELoss()
+optimizer = torch.optim.Adam(model.parameters())
+
+train(5, True, model, device, criterion, optimizer, batches)
+
+# cProfile.run('train(1, grade=False, model, device, criterion, optimizer, batches)', 'stats')
 # p = pstats.Stats('stats')
 # p.strip_dirs().sort_stats(-1).print_stats()
 # p.sort_stats(SortKey.TIME).print_stats(10)
