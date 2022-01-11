@@ -66,7 +66,7 @@ def preprocess_images(labels_csv, source, destination, final_size):
 
 
 class PawpularityDataset(Dataset):
-    def __init__(self, csv, img_dir, tr_test, split=0.8, transformations=None):
+    def __init__(self, csv, img_dir, tr_test, split=0.999, transformations=None):
         self.transformations = transformations
         self.img_dir = img_dir
         self.df = pd.read_csv(csv)
@@ -91,7 +91,8 @@ class PawpularityDataset(Dataset):
         if self.transformations:
             image = self.transformations(image)
         image = image.type(torch.float32)
-        image = (image - torch.mean(image)) / torch.std(image)
+        # image = (image - torch.mean(image)) / torch.std(image)
+        image = (image / 255) - 0.5
         metadata = torch.from_numpy(self.metadata[item])
         target = torch.tensor(self.targets[item].reshape(-1))
         data = (image, metadata)
@@ -104,59 +105,50 @@ class PawpularityModel(nn.Module):
         super(PawpularityModel, self).__init__()
         self.convolution_1 = nn.Sequential(
             nn.Conv2d(in_channels=3, out_channels=32, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(32),
+            nn.LeakyReLU(0.1),
             nn.MaxPool2d(2)
         )
         self.convolution_2 = nn.Sequential(
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(64),
+            nn.LeakyReLU(0.1),
             nn.MaxPool2d(2)
         )
         self.convolution_3 = nn.Sequential(
             nn.Conv2d(in_channels=64, out_channels=128, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.1),
             nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), padding=1),
-            nn.ReLU(),
-            nn.BatchNorm2d(128),
+            nn.LeakyReLU(0.1),
             nn.MaxPool2d(2)
         )
         self.dense_metadata = nn.Sequential(
             nn.Linear(12, 1024),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             nn.Linear(1024, 1024),
-            nn.LeakyReLU(),
+            nn.ReLU(),
             nn.Linear(1024, 1024)
         )
         self.dense_layers = nn.Sequential(
             nn.Dropout(p=0.3),
-            nn.Linear(img_size[0] * img_size[1] * 2 + 1024, 4096),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(4096, 4096),
-            nn.ReLU(),
-            nn.Dropout(p=0.5),
-            nn.Linear(4096, 4096),
+            nn.Linear(img_size[0] * img_size[1] * 2 + 1024, 8192),
             nn.ReLU(),
             nn.Dropout(p=0.3),
-            nn.Linear(4096, 1024),
+            nn.Linear(8192, 8192),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(8192, 8192),
+            nn.ReLU(),
+            nn.Dropout(p=0.3),
+            nn.Linear(8192, 1024),
             nn.ReLU(),
             nn.Dropout(p=0.3),
             nn.Linear(1024, 1)
@@ -224,6 +216,7 @@ def train(model, device, criterion, optimizer, batches, train_loader, test_loade
 
     plt.plot(train_losses, label="Train losses")
     plt.plot(test_losses, label="Test losses")
+    plt.legend()
     plt.show()
 
 
@@ -237,7 +230,7 @@ def grade(model, device, batches, train_loader, test_loader):
         for inputs, targets in train_loader:
             batch += 1
             if batch % 20 == 0:
-                print(f"Grading batch {batch}/{int(np.ceil(batches))}...")
+                print(f"Grading training batch {batch}/{int(np.ceil(batches))}...")
             targets = targets.to(device)
             outputs = model(inputs).cpu().numpy().flatten().tolist()
             train_targets += targets.cpu().numpy().flatten().tolist()
@@ -250,6 +243,7 @@ def grade(model, device, batches, train_loader, test_loader):
         test_outputs = []
         test_targets = []
         model.eval()
+        print(f"Grading test batches...")
         for inputs, targets in test_loader:
             targets = targets.to(device)
             outputs = model(inputs).cpu().numpy().flatten().tolist()
@@ -268,9 +262,10 @@ preprocess_images('train.csv', 'train', 'train-post', img_size)
 
 # Data augmentation transforms
 hFlip = transforms.RandomHorizontalFlip(p=0.25)
-rotate = transforms.RandomRotation(degrees=45)
+affine = transforms.RandomAffine(degrees=90, scale=(0.8, 1.2))
+jitter = transforms.ColorJitter(brightness=0.2, contrast=0.2)
 
-train_transforms = transforms.Compose([hFlip, rotate])
+train_transforms = transforms.Compose([hFlip, affine, jitter])
 
 # Instantiating datasets
 train_dataset = PawpularityDataset(csv='train.csv',
@@ -283,7 +278,7 @@ test_dataset = PawpularityDataset(csv='train.csv',
                                   tr_test='test')
 
 # Debug image showing
-# im_arr = test_dataset.__getitem__(5)[0].numpy()
+# im_arr = test_dataset.__getitem__(5)[0][0].numpy()
 # im_arr = np.transpose(im_arr, (1, 2, 0))
 # plt.imshow(im_arr)
 # plt.show()
@@ -300,10 +295,11 @@ device = torch.device("cuda:0")
 model.to(device)
 
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-7)
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-7)
+
 
 # Training run
-train(model, device, criterion, optimizer, batches, train_loader, test_loader, epochs=20)
+train(model, device, criterion, optimizer, batches, train_loader, test_loader, epochs=15)
 
 torch.save(model.state_dict(), 'model.pth')
 print("Saved model.")
