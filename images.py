@@ -69,7 +69,7 @@ def preprocess_images(labels_csv, source, destination, final_size):
 
 
 class PawpularityDataset(Dataset):
-    def __init__(self, csv, img_dir, tr_test, split=0.8, transformations=None):
+    def __init__(self, csv, img_dir, tr_test, split=0.7, transformations=None):
         self.transformations = transformations
         self.img_dir = img_dir
         self.df = pd.read_csv(csv)
@@ -131,30 +131,20 @@ class PawpularityModel(nn.Module):
             nn.Flatten()
         )
         self.metadata_ann = nn.Sequential(
-            nn.Linear(12, 4096),
+            nn.Linear(12, 512),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(4096, 4096),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(4096, 4096),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(4096, 1024)
+            nn.Dropout()
         )
         self.dense = nn.Sequential(
-            nn.Linear(img_size[0] * img_size[1] * 2 + 1024, 4096),
+            nn.Linear(img_size[0] * img_size[1] * 2 + 512, 4096),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(),
             nn.Linear(4096, 4096),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(),
             nn.Linear(4096, 4096),
             nn.ReLU(),
-            nn.Dropout(p=0.3),
-            nn.Linear(4096, 4096),
-            nn.ReLU(),
-            nn.Dropout(p=0.3),
+            nn.Dropout(),
             nn.Linear(4096, 1)
         )
 
@@ -182,8 +172,6 @@ def train(model, device, criterion, optimizer, train_batches, test_batches,
         batch = 0
         for inputs, targets in train_loader:
             batch += 1
-            if (batch % (train_batches // 10)) - 1 == 0:
-                batch_t0 = datetime.now()
             targets = targets.to(device)
 
             optimizer.zero_grad()
@@ -196,8 +184,7 @@ def train(model, device, criterion, optimizer, train_batches, test_batches,
 
             train_loss.append(loss.item())
             if batch % (train_batches // 10) == 0:
-                dt = datetime.now() - batch_t0
-                print(f"Processed train batch {batch}/{int(np.ceil(train_batches))}, duration {dt}")
+                print(f"Processed train batch {batch}/{int(np.ceil(train_batches))}")
 
         train_losses.append(np.mean(train_loss))
 
@@ -206,15 +193,11 @@ def train(model, device, criterion, optimizer, train_batches, test_batches,
         test_loss = []
         for inputs, targets in test_loader:
             batch += 1
-            if (batch % (test_batches // 10)) - 1 == 0:
-                batch_t0 = datetime.now()
             targets = targets.to(device)
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             test_loss.append(loss.item())
-            if batch % (test_batches // 10) == 0:
-                dt = datetime.now() - batch_t0
-                print(f"Processed test batch {batch}/{int(np.ceil(test_batches))}, duration {dt}")
+            print(f"Processed test batch {batch}/{int(np.ceil(test_batches))}")
 
         test_losses.append(np.mean(test_loss))
         dt = datetime.now() - t0
@@ -258,8 +241,7 @@ def grade(model, device, train_batches, test_batches, baseline_rmse, train_loade
         batch = 0
         for inputs, targets in test_loader:
             batch += 1
-            if batch % (test_batches // 10) == 0:
-                print(f"Grading test batch {batch}/{int(np.ceil(test_batches))}...")
+            print(f"Grading test batch {batch}/{int(np.ceil(test_batches))}...")
             targets = targets.to(device)
             outputs = model(inputs).cpu().numpy().flatten().tolist()
             test_targets += targets.cpu().numpy().flatten().tolist()
@@ -274,7 +256,7 @@ def grade(model, device, train_batches, test_batches, baseline_rmse, train_loade
 
 baseline_rmse = 20.59095133915306
 # Image size, preprocessing
-img_size = (176, 176)
+img_size = (128, 128)
 preprocess_images('train.csv', 'train', 'train-post', img_size)
 
 # Data augmentation transforms
@@ -301,7 +283,7 @@ test_dataset = PawpularityDataset(csv='train.csv',
 # plt.show()
 
 # Training parameters
-batch_sz = 32
+batch_sz = 128
 train_batches = train_dataset.__len__() / batch_sz
 test_batches = test_dataset.__len__() / batch_sz
 
@@ -313,11 +295,11 @@ device = torch.device("cuda:0")
 model.to(device)
 
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-5)
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
 
 # Training run
 train(model, device, criterion, optimizer, train_batches, test_batches, baseline_rmse,
-      train_loader, test_loader, epochs=50)
+      train_loader, test_loader, epochs=15)
 
 torch.save(model.state_dict(), 'model.pth')
 print("Saved model.")
