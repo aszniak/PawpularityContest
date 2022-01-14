@@ -2,22 +2,18 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
-import torchvision.transforms as transforms
 from torchvision.io import read_image
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from datetime import datetime
 import os
-import cProfile
-import pstats
-from pstats import SortKey
 from PIL import Image
 from sklearn.preprocessing import StandardScaler
 
 
 def process_image(im, final_size, destination, index):
-    bg = (0, 0, 0)
+    bg = (127, 127, 127)
     w, h = im.size
     if w == h:
         image = im.resize(final_size)
@@ -69,7 +65,7 @@ def preprocess_images(labels_csv, source, destination, final_size):
 
 
 class PawpularityDataset(Dataset):
-    def __init__(self, csv, img_dir, tr_test, split=0.7, transformations=None):
+    def __init__(self, csv, img_dir, tr_test, split=0.9, transformations=None):
         self.transformations = transformations
         self.img_dir = img_dir
         self.df = pd.read_csv(csv)
@@ -95,7 +91,7 @@ class PawpularityDataset(Dataset):
         if self.transformations:
             image = self.transformations(image)
         image = image.type(torch.float32)
-        image = (image / 255) - 0.5
+        image = (image - torch.mean(image)) / torch.std(image)
         metadata = torch.from_numpy(self.metadata[item])
         target = torch.tensor(self.targets[item].reshape(-1))
         data = (image, metadata)
@@ -113,8 +109,14 @@ class PawpularityModel(nn.Module):
             nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), padding='same'),
             nn.ReLU(),
             nn.BatchNorm2d(32),
+            nn.Conv2d(in_channels=32, out_channels=32, kernel_size=(3, 3), padding='same'),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
             nn.MaxPool2d(2),
             nn.Conv2d(in_channels=32, out_channels=64, kernel_size=(3, 3), padding='same'),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), padding='same'),
             nn.ReLU(),
             nn.BatchNorm2d(64),
             nn.Conv2d(in_channels=64, out_channels=64, kernel_size=(3, 3), padding='same'),
@@ -127,11 +129,17 @@ class PawpularityModel(nn.Module):
             nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), padding='same'),
             nn.ReLU(),
             nn.BatchNorm2d(128),
+            nn.Conv2d(in_channels=128, out_channels=128, kernel_size=(3, 3), padding='same'),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
             nn.MaxPool2d(2),
             nn.Flatten()
         )
         self.metadata_ann = nn.Sequential(
             nn.Linear(12, 512),
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(512, 512),
             nn.ReLU(),
             nn.Dropout()
         )
@@ -145,7 +153,10 @@ class PawpularityModel(nn.Module):
             nn.Linear(4096, 4096),
             nn.ReLU(),
             nn.Dropout(),
-            nn.Linear(4096, 1)
+            nn.Linear(4096, 1024),
+            nn.ReLU(),
+            nn.Dropout(),
+            nn.Linear(1024, 1)
         )
 
     def forward(self, X):
@@ -197,7 +208,8 @@ def train(model, device, criterion, optimizer, train_batches, test_batches,
             outputs = model(inputs)
             loss = criterion(outputs, targets)
             test_loss.append(loss.item())
-            print(f"Processed test batch {batch}/{int(np.ceil(test_batches))}")
+            if batch % (test_batches // 10) == 0:
+                print(f"Processed test batch {batch}/{int(np.ceil(test_batches))}")
 
         test_losses.append(np.mean(test_loss))
         dt = datetime.now() - t0
@@ -233,6 +245,10 @@ def grade(model, device, train_batches, test_batches, baseline_rmse, train_loade
 
         train_outputs = np.array(train_outputs)
         train_targets = np.array(train_targets)
+        train_diff = train_targets - train_outputs
+        plt.hist(train_diff, bins=range(-75, 75), label="Train diff", color='blue')
+        plt.show()
+
         train_rmse = np.sqrt(((train_targets - train_outputs) ** 2).mean())
 
         test_outputs = []
@@ -241,7 +257,8 @@ def grade(model, device, train_batches, test_batches, baseline_rmse, train_loade
         batch = 0
         for inputs, targets in test_loader:
             batch += 1
-            print(f"Grading test batch {batch}/{int(np.ceil(test_batches))}...")
+            if batch % (test_batches // 10) == 0:
+                print(f"Grading test batch {batch}/{int(np.ceil(test_batches))}...")
             targets = targets.to(device)
             outputs = model(inputs).cpu().numpy().flatten().tolist()
             test_targets += targets.cpu().numpy().flatten().tolist()
@@ -249,6 +266,10 @@ def grade(model, device, train_batches, test_batches, baseline_rmse, train_loade
 
         test_outputs = np.array(test_outputs)
         test_targets = np.array(test_targets)
+        test_diff = test_targets - test_outputs
+        plt.hist(test_diff, bins=range(-75, 75), label="Test diff", color='orange')
+        plt.show()
+
         test_rmse = np.sqrt(((test_targets - test_outputs) ** 2).mean())
         print(f"Train RMSE: {train_rmse:.4f}, baseline diff: {train_rmse - baseline_rmse:.4f}\n"
               f"Test RMSE:  {test_rmse:.4f}, baseline diff: {test_rmse - baseline_rmse:.4f}")
@@ -259,31 +280,20 @@ baseline_rmse = 20.59095133915306
 img_size = (128, 128)
 preprocess_images('train.csv', 'train', 'train-post', img_size)
 
-# Data augmentation transforms
-hFlip = transforms.RandomHorizontalFlip(p=0.25)
-affine = transforms.RandomAffine(degrees=90, scale=(0.7, 1.3))
-jitter = transforms.ColorJitter(brightness=0.2, contrast=0.2)
-
-train_transforms = transforms.Compose([hFlip, affine, jitter])
 
 # Instantiating datasets
 train_dataset = PawpularityDataset(csv='train.csv',
                                    img_dir='train-post',
                                    tr_test='train',
-                                   transformations=train_transforms)
+                                   transformations=None)
 
 test_dataset = PawpularityDataset(csv='train.csv',
                                   img_dir='train-post',
                                   tr_test='test')
 
-# Debug image showing
-# im_arr = test_dataset.__getitem__(5)[0][0].numpy()
-# im_arr = np.transpose(im_arr, (1, 2, 0))
-# plt.imshow(im_arr)
-# plt.show()
 
 # Training parameters
-batch_sz = 128
+batch_sz = 96
 train_batches = train_dataset.__len__() / batch_sz
 test_batches = test_dataset.__len__() / batch_sz
 
@@ -295,11 +305,11 @@ device = torch.device("cuda:0")
 model.to(device)
 
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=1e-6)
+optimizer = torch.optim.Adam(model.parameters(), lr=3e-6)
 
 # Training run
 train(model, device, criterion, optimizer, train_batches, test_batches, baseline_rmse,
-      train_loader, test_loader, epochs=15)
+      train_loader, test_loader, epochs=50)
 
 torch.save(model.state_dict(), 'model.pth')
 print("Saved model.")
@@ -307,43 +317,37 @@ print("Saved model.")
 # Grading
 grade(model, device, train_batches, test_batches, baseline_rmse, train_loader, test_loader)
 
-# print("Loading model...")
-# model.load_state_dict(torch.load('model.pth'))
-# model.eval()
 
 # Create submissions
-# with torch.no_grad():
-#     preprocess_images('test.csv', 'test', 'test-post', img_size)
-#     submission = pd.DataFrame(columns=['Id', 'Pawpularity'])
-#     df = pd.read_csv('test.csv')
-#     metadata_df = df.drop(columns=['Id'])
-#     metadata = metadata_df.to_numpy(dtype="float32")
-#     scaler = StandardScaler()
-#     metadata = scaler.fit_transform(metadata)
-#     indexes = df['Id']
-#     ids = []
-#     pawpularities = []
-#     i = 0
-#     for index in indexes:
-#         ids.append(index)
-#         image = read_image(os.path.join('test-post', index + ".jpg"))
-#         image = image.type(torch.float32)
-#         image = (image - torch.mean(image)) / torch.std(image)
-#         image = image.reshape(1, 3, 240, 240)
-#         md = metadata[i]
-#         md = md.reshape(1, 12)
-#         md = torch.from_numpy(md)
-#         data = (image, md)
-#         output = model(data).cpu().item()
-#         pawpularities.append(output)
-#         i += 1
-#
-#     submission['Id'] = ids
-#     submission['Pawpularity'] = pawpularities
-#     submission.to_csv('submission.csv', index=False)
+with torch.no_grad():
+    preprocess_images('test.csv', 'test', 'test-post', img_size)
+    submission = pd.DataFrame(columns=['Id', 'Pawpularity'])
+    df = pd.read_csv('test.csv')
+    metadata_df = df.drop(columns=['Id'])
+    metadata = metadata_df.to_numpy(dtype="float32")
+    scaler = StandardScaler()
+    metadata = scaler.fit_transform(metadata)
+    indexes = df['Id']
+    ids = []
+    pawpularities = []
+    i = 0
+    for index in indexes:
+        ids.append(index)
+        image = read_image(os.path.join('test-post', index + ".jpg"))
+        image = image.type(torch.float32)
+        image = (image - torch.mean(image)) / torch.std(image)
+        image = image.reshape(1, 3, img_size[0], img_size[1])
+        md = metadata[i]
+        md = md.reshape(1, 12)
+        md = torch.from_numpy(md)
+        data = (image, md)
+        output = model(data).cpu().item()
+        pawpularities.append(output)
+        i += 1
 
-# Profiling
-# cProfile.run('train(model, device, criterion, optimizer, batches, train_loader, test_loader, epochs=1)', 'stats')
-# p = pstats.Stats('stats')
-# p.strip_dirs().sort_stats(-1).print_stats()
-# p.sort_stats(SortKey.TIME).print_stats(10)
+    submission['Id'] = ids
+    submission['Pawpularity'] = pawpularities
+    submission.to_csv('submission.csv', index=False)
+    print("Saved submission.")
+
+
